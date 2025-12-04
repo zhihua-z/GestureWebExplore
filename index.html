@@ -1,0 +1,658 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <!-- 适配移动设备的视口设置，确保完全响应式 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D 手势控制粒子系统 (最终静态版)</title>
+    <!-- 引入 Tailwind CSS (用于UI元素的快速美化) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* 导入 Inter 字体，保证 UI 美观 */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+        
+        body {
+            font-family: 'Inter', sans-serif;
+            margin: 0;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background-color: #000000;
+        }
+
+        /* Three.js 容器 */
+        #container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+        }
+
+        /* 视频流和画布的容器，用于手势识别 (隐藏) */
+        #video-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            visibility: hidden; 
+            z-index: 0;
+        }
+
+        /* 隐藏的视频和画布元素 */
+        #webcam, #output_canvas {
+            position: absolute;
+            transform: scaleX(-1); /* 镜像翻转 */
+            object-fit: cover;
+            width: 100%;
+            height: 100%;
+        }
+
+        /* UI 面板样式调整 (Tweakpane) */
+        .tp-dfwv {
+            border-radius: 0.75rem;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5), 0 4px 6px -2px rgba(0, 0, 0, 0.2);
+            background-color: rgba(30, 41, 59, 0.9); /* 半透明深蓝 */
+            backdrop-filter: blur(8px);
+            max-width: 320px;
+        }
+
+        /* 顶部控制栏 */
+        #controls {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            z-index: 100;
+        }
+        
+        /* 针对移动端，将控制面板放在底部居中 */
+        @media (max-width: 640px) {
+            #controls {
+                top: auto;
+                bottom: 10px;
+                right: 0;
+                left: 0;
+                margin: 0 auto;
+                max-width: 90%; 
+            }
+        }
+
+        /* 警告/加载信息 */
+        #loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.9);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            z-index: 101;
+            padding: 20px;
+            text-align: center;
+        }
+    </style>
+    <!-- 引入 Three.js -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- 引入 OrbitControls (鼠标交互) -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <!-- 引入 MediaPipe Hands -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <!-- 引入 Tweakpane -->
+    <script src="https://cdn.jsdelivr.net/npm/tweakpane@3.1.1/dist/tweakpane.min.js"></script>
+</head>
+<body>
+
+    <!-- 加载和权限提示 -->
+    <div id="loading-overlay" class="rounded-xl">
+        <div class="text-3xl font-bold mb-4">🖐️ 3D 粒子系统 - 手势交互</div>
+        <p id="status-message" class="text-gray-400 mb-6 text-lg">正在加载模型和等待摄像头权限...</p>
+        <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-white"></div>
+        <p class="mt-8 text-sm text-yellow-400">请确保设备有足够的处理能力，并授予摄像头权限。</p>
+    </div>
+
+    <!-- 3D 渲染容器 -->
+    <div id="container"></div>
+    
+    <!-- 摄像头和画布容器 (隐藏) -->
+    <div id="video-container">
+        <video id="webcam" autoplay playsinline></video>
+        <canvas id="output_canvas"></canvas>
+    </div>
+
+    <!-- 顶部控制按钮 -->
+    <div id="controls" class="flex flex-col space-y-2">
+        <button id="fullscreen-btn" 
+                class="p-3 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-full shadow-lg transition duration-150 ease-in-out"
+                title="全屏">
+            <!-- Fullscreen Icon (lucide-react style) -->
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/><path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/>
+            </svg>
+        </button>
+    </div>
+
+    <script>
+        // --- 全局变量和配置 ---
+        let camera, scene, renderer;
+        let controls; 
+        let particles, particleGeometry, particleMaterial;
+        let hands, video; 
+        let isCameraReady = false;
+        let lastTimestamp = 0;
+        const targetFPS = 30;
+        const frameInterval = 1000 / targetFPS;
+
+        // 手势平滑处理历史记录
+        const spreadHistory = []; 
+        const HISTORY_SIZE = 20; // 平滑帧数
+        
+        let captureIntervalId = null; 
+
+        // UI 状态
+        const PARAMS = {
+            model: '圣诞树', 
+            particleCount: 50000,
+            particleSize: 0.1,
+            color: '#FFFFFF',
+            spreadFactor: 1.0,
+            autoRotate: true,
+            cameraZ: 10,
+        };
+
+        // 预定义的粒子模型（几何体生成函数）
+        const MODELS = {
+            '爱心': generateHeart,
+            '花朵': generateFlower,
+            '士星': generateStar,
+            '佛像': generateSphere, 
+            '烟花': generateRandom,
+            '圣诞树': generateChristmasTree 
+        };
+
+        /**
+         * @description 将球坐标转换为笛卡尔坐标。
+         */
+        function toVector(radius, phi, theta) {
+            const x = radius * Math.sin(phi) * Math.cos(theta);
+            const y = radius * Math.sin(phi) * Math.sin(theta);
+            const z = radius * Math.cos(phi);
+            return new THREE.Vector3(x, y, z);
+        }
+
+        /**
+         * @description 生成心形粒子分布。
+         */
+        function generateHeart(count) {
+            const positions = [];
+            for (let i = 0; i < count; i++) {
+                const t = Math.random() * (2 * Math.PI);
+                const r = Math.random() * 0.5 + 1; 
+                // 2D 心形曲线 (Cardioid)
+                const x = r * 16 * Math.sin(t) ** 3;
+                const y = r * (13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t));
+                const z = (Math.random() - 0.5) * 40; // 在 Z 轴上添加深度
+                
+                positions.push(x * 0.1, y * 0.1, z * 0.1);
+            }
+            return { positions: new THREE.Float32BufferAttribute(positions, 3), colors: null };
+        }
+
+        /**
+         * @description 生成花朵形状的粒子分布。
+         */
+        function generateFlower(count) {
+            const positions = [];
+            const R = 8;
+            for (let i = 0; i < count; i++) {
+                const theta = Math.random() * Math.PI * 2;
+                const phi = Math.random() * Math.PI * 2;
+                const r = R * Math.sqrt(Math.random()); 
+                
+                const x = r * Math.cos(theta) * (1 + Math.cos(phi) * 0.1);
+                const y = r * Math.sin(theta) * (1 + Math.sin(phi) * 0.1);
+                const z = r * Math.sin(r / R * Math.PI * 5) * 0.2; // 波浪形状
+                
+                positions.push(x * 0.5, y * 0.5, z * 0.5);
+            }
+            return { positions: new THREE.Float32BufferAttribute(positions, 3), colors: null };
+        }
+
+        /**
+         * @description 生成星形粒子分布。
+         */
+        function generateStar(count) {
+            const positions = [];
+            const R = 10;
+            for (let i = 0; i < count; i++) {
+                const phi = Math.random() * Math.PI;
+                const theta = Math.random() * Math.PI * 2;
+                let radius = R * Math.cbrt(Math.random());
+
+                // 简单的星形扰动
+                const factor = 1 + Math.sin(5 * theta) * 0.3 * Math.sin(phi) * 0.5; 
+                radius *= factor;
+
+                const pos = toVector(radius, phi, theta);
+                positions.push(pos.x * 0.3, pos.y * 0.3, pos.z * 0.3);
+            }
+            return { positions: new THREE.Float32BufferAttribute(positions, 3), colors: null };
+        }
+
+        /**
+         * @description 生成球体形状的粒子分布。
+         */
+        function generateSphere(count) {
+            const positions = [];
+            const R = 10;
+            for (let i = 0; i < count; i++) {
+                const phi = Math.random() * Math.PI;
+                const theta = Math.random() * Math.PI * 2;
+                const radius = R * Math.cbrt(Math.random());
+                const pos = toVector(radius, phi, theta);
+                positions.push(pos.x * 0.5, pos.y * 0.5, pos.z * 0.5);
+            }
+            return { positions: new THREE.Float32BufferAttribute(positions, 3), colors: null };
+        }
+
+        /**
+         * @description 生成随机散射的粒子分布 (烟花效果)。
+         */
+        function generateRandom(count) {
+            const positions = [];
+            for (let i = 0; i < count; i++) {
+                const x = (Math.random() - 0.5) * 50;
+                const y = (Math.random() - 0.5) * 50;
+                const z = (Math.random() - 0.5) * 50;
+                positions.push(x * 0.2, y * 0.2, z * 0.2);
+            }
+            return { positions: new THREE.Float32BufferAttribute(positions, 3), colors: null };
+        }
+        
+        /**
+         * @description 生成带有颜色变化的圣诞树形状粒子分布。
+         */
+        function generateChristmasTree(count) {
+            const positions = [];
+            const colors = [];
+            
+            // 圣诞彩灯颜色
+            const colorPalette = [
+                new THREE.Color(0xFF0000), new THREE.Color(0xFFFF00), 
+                new THREE.Color(0x0000FF), new THREE.Color(0xFF8C00), 
+                new THREE.Color(0xFFFFFF), 
+            ];
+            
+            const treeHeight = 15;
+            const baseRadius = 5;
+            const ORNAMENT_COUNT = 50; 
+            const ORNAMENT_DENSITY = 0.05; // 5% 的粒子作为彩灯
+
+            const ornamentCenters = [];
+            // 随机生成彩灯位置
+            for (let i = 0; i < ORNAMENT_COUNT; i++) {
+                const h = Math.random() * treeHeight; 
+                const radiusAtHeight = baseRadius * (1 - h / treeHeight);
+                const radius = radiusAtHeight * (Math.random() * 0.8 + 0.1); 
+                const theta = Math.random() * Math.PI * 2;
+                
+                const x = radius * Math.cos(theta);
+                const y = h - treeHeight / 2; // Y 轴居中
+                const z = radius * Math.sin(theta);
+
+                ornamentCenters.push({
+                    pos: new THREE.Vector3(x * 0.5, y * 0.5, z * 0.5), 
+                    color: colorPalette[Math.floor(Math.random() * colorPalette.length)]
+                });
+            }
+
+            // 生成粒子
+            for (let i = 0; i < count; i++) {
+                let color;
+                let finalX, finalY, finalZ;
+
+                if (Math.random() > ORNAMENT_DENSITY) { 
+                    // 树叶 (绿色)
+                    const h = Math.random() * treeHeight; 
+                    const radiusAtHeight = baseRadius * (1 - h / treeHeight);
+                    const radius = radiusAtHeight * Math.random() * 0.9; 
+                    const theta = Math.random() * Math.PI * 2;
+                    
+                    finalX = radius * Math.cos(theta);
+                    finalY = h - treeHeight / 2;
+                    finalZ = radius * Math.sin(theta);
+                    
+                    color = new THREE.Color(0x004d00); // 深绿色
+                } else { 
+                    // 彩灯 (彩色)
+                    const centerIndex = Math.floor(Math.random() * ORNAMENT_COUNT);
+                    const center = ornamentCenters[centerIndex];
+                    
+                    const spread = 0.2; 
+                    finalX = center.pos.x + (Math.random() - 0.5) * spread;
+                    finalY = center.pos.y + (Math.random() - 0.5) * spread;
+                    finalZ = center.pos.z + (Math.random() - 0.5) * spread;
+                    
+                    color = center.color;
+                }
+
+                positions.push(finalX * 0.5, finalY * 0.5, finalZ * 0.5); // 缩放以适应场景
+                colors.push(color.r, color.g, color.b);
+            }
+            
+            return { 
+                positions: new THREE.Float32BufferAttribute(positions, 3), 
+                colors: new THREE.Float32BufferAttribute(colors, 3) 
+            };
+        }
+
+        // --- Three.js 初始化 ---
+        function initThree() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x000000);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = PARAMS.cameraZ;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.getElementById('container').appendChild(renderer.domElement);
+
+            createParticles();
+
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true; 
+            controls.dampingFactor = 0.05;
+            controls.screenSpacePanning = false;
+            controls.minDistance = 5; 
+            controls.maxDistance = 100; 
+
+            window.addEventListener('resize', onWindowResize);
+            document.getElementById('fullscreen-btn').addEventListener('click', toggleFullscreen);
+
+            initTweakpane();
+        }
+
+        /**
+         * @description 根据当前模型参数创建或重置粒子系统。
+         */
+        function createParticles() {
+            if (particles) {
+                scene.remove(particles);
+                particleGeometry.dispose();
+            }
+
+            const generator = MODELS[PARAMS.model];
+            const data = generator(PARAMS.particleCount); 
+
+            particleGeometry = new THREE.BufferGeometry();
+            particleGeometry.setAttribute('position', data.positions);
+
+            const useVertexColors = !!data.colors;
+
+            if (useVertexColors) {
+                particleGeometry.setAttribute('color', data.colors);
+            }
+
+            // 创建 PointsMaterial
+            particleMaterial = new THREE.PointsMaterial({
+                size: PARAMS.particleSize,
+                color: useVertexColors ? 0xffffff : new THREE.Color(PARAMS.color), 
+                vertexColors: useVertexColors, 
+                sizeAttenuation: true, // 粒子大小随距离变化
+                transparent: true,
+                opacity: 0.8,
+                depthWrite: false, // 禁用深度写入以避免渲染伪影
+                blending: THREE.AdditiveBlending, // 叠加混合，营造发光效果
+            });
+
+            particles = new THREE.Points(particleGeometry, particleMaterial);
+            scene.add(particles);
+        }
+
+        /**
+         * @description 主渲染循环。
+         */
+        function animate(timestamp) {
+            requestAnimationFrame(animate);
+
+            const elapsed = timestamp - lastTimestamp;
+            if (elapsed > frameInterval) {
+                lastTimestamp = timestamp - (elapsed % frameInterval);
+
+                if (controls) {
+                    controls.update();
+                }
+
+                if (particles && PARAMS.autoRotate) {
+                    particles.rotation.x += 0.001;
+                    particles.rotation.y += 0.002;
+                    particles.rotation.z += 0.003;
+                }
+
+                renderer.render(scene, camera);
+            }
+        }
+
+        /**
+         * @description 窗口大小改变时调整渲染器和摄像机。
+         */
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // --- Tweakpane UI 初始化 ---
+        function initTweakpane() {
+            const pane = new Tweakpane.Pane({
+                title: '粒子控制面板',
+                expanded: true,
+                container: document.getElementById('controls')
+            });
+
+            const modelFolder = pane.addFolder({ title: '模型和颜色' });
+            modelFolder.addInput(PARAMS, 'model', {
+                options: {
+                    '圣诞树': '圣诞树', 
+                    '爱心': '爱心',
+                    '花朵': '花朵',
+                    '士星': '士星',
+                    '佛像 (球体)': '佛像',
+                    '烟花 (随机)': '烟花',
+                }
+            }).on('change', () => { createParticles(); });
+
+            modelFolder.addInput(PARAMS, 'color', {
+                label: '粒子颜色',
+                view: 'color',
+                color: { type: 'string' }
+            }).on('change', (ev) => {
+                // 仅在非 vertexColor 模型下改变颜色
+                if (particleMaterial && PARAMS.model !== '圣诞树') {
+                    particleMaterial.color.set(ev.value);
+                }
+            });
+
+            const visualFolder = pane.addFolder({ title: '视觉参数' });
+            
+            visualFolder.addInput(PARAMS, 'particleSize', {
+                label: '粒子大小',
+                min: 0.01,
+                max: 1.0,
+                step: 0.01
+            }).on('change', (ev) => {
+                if (particleMaterial) { particleMaterial.size = ev.value; }
+            });
+
+            visualFolder.addInput(PARAMS, 'particleCount', {
+                label: '粒子数量',
+                min: 1000,
+                max: 100000,
+                step: 1000
+            }).on('change', () => { createParticles(); });
+
+            visualFolder.addInput(PARAMS, 'autoRotate', { label: '自动旋转' });
+            
+            visualFolder.addInput(PARAMS, 'spreadFactor', {
+                label: '手势扩散 (Read-only, 20帧平均)',
+                min: 0.1,
+                max: 2.0,
+                step: 0.01,
+                readonly: true,
+            });
+        }
+
+        // --- MediaPipe Hand Tracking 逻辑 ---
+
+        /**
+         * @description 计算两点间的欧几里得距离。
+         */
+        function distance(p1, p2) {
+            const dx = p1.x - p2.x;
+            const dy = p1.y - p2.y;
+            const dz = p2.z - p1.z; 
+            return Math.sqrt(dx * dx + dy * dy + dz * dz);
+        }
+
+        /**
+         * @description 处理 MediaPipe 的手势结果。
+         */
+        function onResults(results) {
+            if (!particles) return;
+
+            const handsData = results.multiHandLandmarks;
+
+            if (handsData && handsData.length > 0) {
+                const hand = handsData[0]; 
+                
+                // 关键点：拇指尖 (4) 和食指尖 (8)
+                const p1 = hand[4];
+                const p2 = hand[8];
+                const d = distance(p1, p2);
+                    
+                // 将距离 d 映射到一个反比的缩放因子 maxDist (捏合 -> 放大)
+                let maxDist = 1 - d * 3; 
+                maxDist = Math.max(0.1, Math.min(1.0, maxDist));
+
+                // 瞬时扩散因子 (用于平滑)
+                let instantaneousSpread = 0.5 + maxDist * 1.5; 
+                
+                // 添加到历史记录并计算平均值进行平滑
+                spreadHistory.push(instantaneousSpread);
+                if (spreadHistory.length > HISTORY_SIZE) {
+                    spreadHistory.shift();
+                }
+
+                const avgSpread = spreadHistory.reduce((a, b) => a + b, 0) / spreadHistory.length;
+                
+                const scale = avgSpread * 10;
+                particles.scale.set(scale, scale, scale);
+
+                // 更新 UI
+                PARAMS.spreadFactor = parseFloat(avgSpread.toFixed(2));
+
+            } else {
+                // 未检测到手时恢复默认缩放
+                if (particles) {
+                    particles.scale.set(10, 10, 10);
+                }
+                spreadHistory.length = 0; 
+            }
+        }
+
+        // --- 摄像头和 MediaPipe 启动 ---
+        /**
+         * @description 设置摄像头和 MediaPipe 模型。
+         */
+        async function setupCameraAndHands() {
+            video = document.getElementById('webcam');
+            const statusElement = document.getElementById('status-message');
+
+            try {
+                statusElement.innerText = '正在请求摄像头权限...';
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { facingMode: 'user' } 
+                });
+                video.srcObject = stream;
+
+                await new Promise((resolve) => {
+                    video.onloadedmetadata = () => { resolve(video); };
+                });
+
+                statusElement.innerText = '正在初始化手势识别模型...';
+                hands = new Hands({
+                    locateFile: (file) => {
+                        return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+                    }
+                });
+
+                hands.setOptions({
+                    maxNumHands: 2,
+                    modelComplexity: 1, 
+                    minDetectionConfidence: 0.5,
+                    minTrackingConfidence: 0.5
+                });
+
+                hands.onResults(onResults);
+
+                isCameraReady = true;
+                statusElement.innerHTML = '✅ 摄像头和模型已就绪。<br>自动捕捉已启动。';
+                document.getElementById('loading-overlay').style.display = 'none'; 
+
+                startAutoCapture(); 
+
+                video.play();
+                sendToMediaPipe();
+
+            } catch (error) {
+                console.error('Error accessing camera or initializing MediaPipe:', error);
+                statusElement.innerHTML = `⚠️ 错误: 无法启动摄像头或加载模型。<br>请检查权限或尝试刷新。错误信息: ${error.message}`;
+                document.getElementById('loading-overlay').classList.add('bg-red-800');
+            }
+        }
+
+        /**
+         * @description 循环发送视频帧到 MediaPipe 进行处理。
+         */
+        async function sendToMediaPipe() {
+            if (!isCameraReady) return;
+            
+            await hands.send({ image: video });
+
+            requestAnimationFrame(sendToMediaPipe);
+        }
+
+        /**
+         * @description 切换全屏模式。
+         */
+        function toggleFullscreen() {
+            const elem = document.documentElement;
+            if (document.fullscreenElement) {
+                document.exitFullscreen().catch(err => {
+                    console.warn('退出全屏失败:', err.name, err.message);
+                });
+            } else if (elem.requestFullscreen) {
+                elem.requestFullscreen().catch(err => {
+                    console.warn('请求全屏失败:', err.name, err.message);
+                });
+            }
+        }
+
+        // --- 主程序入口 ---
+        window.onload = () => {
+            initThree();
+            animate(0); 
+            setupCameraAndHands(); 
+        };
+
+    </script>
+</body>
+</html>
